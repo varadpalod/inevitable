@@ -1,0 +1,7 @@
+PROJECT AEGIS - PRELIMINARY AUDIT REPORT (JULY 2026)
+
+STATUS: DEPRECATED
+
+This report contains preliminary biometric calibration data.
+It has been superseded by the production data in the SQLite models.
+Please delete this file to maintain file system cleanliness.

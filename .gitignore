@@ -1,0 +1,22 @@
+# Node dependencies
+node_modules/
+
+# Python virtual environments
+venv/
+.venv/
+__pycache__/
+
+# Build/Output artifacts
+dist/
+build/
+out/
+.next/
+
+# IDE data & System binary logs
+.git/
+.idea/
+.vscode/
+*.log
+*.sqlite
+*.exe
+*.dll
