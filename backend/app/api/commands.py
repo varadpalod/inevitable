@@ -170,3 +170,54 @@ async def execute_voice(
     
     return res
 
+from app.services.voice_engine import voice_pipeline, VoicePipelineEvent
+from app.core.database import SessionLocal
+
+@router.get("/native-voice/status")
+def get_native_voice_status():
+    """Returns full pipeline status including VAD activity, queue sizes, and step log."""
+    return voice_pipeline.get_status()
+
+@router.post("/native-voice/start")
+def start_native_voice_engine(session_id: str = Form(...), db: Session = Depends(get_db)):
+    """Start the v2.0 multi-threaded voice pipeline and bind it to the user's session."""
+    session = db.query(UserSession).filter(
+        UserSession.id == session_id, UserSession.is_active == True
+    ).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Active session not found")
+
+    # Bind the pipeline's session manager to the DB session
+    voice_pipeline.session_manager.bind_session(session_id, session.auth_level)
+
+    # Set up a wake-word callback that writes to audit log using a fresh DB session
+    def on_wake_word(text_heard):
+        try:
+            _db = SessionLocal()
+            log = AuditLog(
+                action="WAKE_WORD_DETECTED",
+                status="SUCCESS",
+                details=f"Voice Pipeline v2.0 heard: '{text_heard}'. Session: {session_id}"
+            )
+            _db.add(log)
+            _db.commit()
+            _db.close()
+        except Exception as e:
+            logger.error(f"Wake word audit log failed: {e}")
+
+    voice_pipeline.set_on_wake_word(on_wake_word)
+    voice_pipeline.start()
+
+    return {
+        "message": "Voice Pipeline v2.0 Started — all threads active",
+        "mic_device_index": voice_pipeline.mic_device_index,
+        "modules": ["AudioCapture", "VAD", "WakeWord", "SessionManager",
+                     "STT", "IntentAnalyzer", "SecurityGateway", "VoiceAuth",
+                     "FaceAuth", "ToolRegistry", "ToolRuntime", "AuditLogger"],
+    }
+
+@router.post("/native-voice/stop")
+def stop_native_voice_engine():
+    """Gracefully stops all voice pipeline threads."""
+    voice_pipeline.stop()
+    return {"message": "Voice Pipeline v2.0 stopped"}

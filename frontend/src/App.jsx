@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { useWakeWordRecognition } from './hooks/useWakeWordRecognition';
 
 const API_BASE = "http://127.0.0.1:8000/api/v1";
 
@@ -37,18 +38,68 @@ function App() {
   const [isWakeWordListening, setIsWakeWordListening] = useState(true);
   const [wakeWordStatus, setWakeWordStatus] = useState("SAY 'HEY JARVIS' OR CLICK CORE TO ACTIVATE");
   const [arcState, setArcState] = useState("idle"); // idle, listening, thinking, speaking
+  const [liveSpeechTranscript, setLiveSpeechTranscript] = useState("");
+  const [micPermissionGranted, setMicPermissionGranted] = useState(false);
+  const [audioVolumeLevel, setAudioVolumeLevel] = useState(0);
+  const [speechLog, setSpeechLog] = useState([]);
+  const [audioDevices, setAudioDevices] = useState([]);
+  const [selectedDeviceId, setSelectedDeviceId] = useState('');
 
   const consoleEndRef = useRef(null);
   const videoRef = useRef(null);
   const mediaStreamRef = useRef(null);
   const wakeWordRecognitionRef = useRef(null);
+  const audioContextRef = useRef(null);
+  const analyserRef = useRef(null);
+  const animFrameRef = useRef(null);
 
-  // Poll audit logs and check session status
+  // Poll audit logs and native hardware voice status
   useEffect(() => {
     fetchAuditLogs();
-    const interval = setInterval(fetchAuditLogs, 3000);
+    fetchNativeVoiceStatus();
+    const interval = setInterval(() => {
+      fetchAuditLogs();
+      fetchNativeVoiceStatus();
+    }, 2000);
     return () => clearInterval(interval);
-  }, []);
+  }, [sessionId]);
+
+  const fetchNativeVoiceStatus = async () => {
+    if (!sessionId) return;
+    try {
+      const res = await fetch(`${API_BASE}/commands/native-voice/status`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.live_transcript) {
+          setLiveSpeechTranscript(data.live_transcript);
+          setSpeechLog(prev => [`[Native Hardware Mic] "${data.live_transcript}"`, ...prev.slice(0, 4)]);
+        }
+        if (data.last_event === "WAKE_WORD_DETECTED" && isWakeWordListening) {
+          setIsWakeWordListening(false);
+          triggerAutomatedVoiceFlow();
+        }
+      }
+    } catch (e) {}
+  };
+
+  const startNativeHardwareEngine = async () => {
+    if (!sessionId) return;
+    try {
+      const formData = new FormData();
+      formData.append("session_id", sessionId);
+      const res = await fetch(`${API_BASE}/commands/native-voice/start`, {
+        method: 'POST',
+        body: formData
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setInfoMsg(`Native Hardware Voice Engine Started! Active on Mic #${data.mic_device_index}`);
+        setMicPermissionGranted(true);
+      }
+    } catch (e) {
+      setErrorMsg("Failed to start Native Voice Engine.");
+    }
+  };
 
   useEffect(() => {
     if (sessionId) {
@@ -64,7 +115,7 @@ function App() {
         setAuditLogs(data);
       }
     } catch (err) {
-      console.error("Failed to fetch audit logs", err);
+      // Backend offline or unreachable
     }
   };
 
@@ -80,7 +131,7 @@ function App() {
         handleLogout();
       }
     } catch (err) {
-      console.error("Error validating session status", err);
+      // Backend offline or unreachable
     }
   };
 
@@ -277,81 +328,126 @@ function App() {
     }
   };
 
-  // Continuous Wake-Word Background Listener ("Hey JARVIS" / "JARVIS")
-  useEffect(() => {
-    if (!token || !isWakeWordListening) return;
+  // Prompt for explicit browser microphone permissions & setup Web Audio VU Analyzer
+  const requestMicPermission = async (targetDeviceId = null) => {
+    try {
+      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+        const audioConstraints = targetDeviceId ? { deviceId: { exact: targetDeviceId } } : true;
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
+        setMicPermissionGranted(true);
+        setInfoMsg("Microphone access granted! Live Audio Stream & VU Meter ACTIVE.");
 
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) return;
-
-    let restartTimer = null;
-    let recognition = null;
-
-    const startRecognition = () => {
-      try {
-        if (recognition) {
-          try { recognition.abort(); } catch (e) {}
-        }
-
-        recognition = new SpeechRecognition();
-        recognition.continuous = true;
-        recognition.interimResults = true;
-        recognition.lang = 'en-US';
-        wakeWordRecognitionRef.current = recognition;
-
-        recognition.onresult = (event) => {
-          const transcript = Array.from(event.results)
-            .map(result => result[0].transcript.toLowerCase())
-            .join(' ');
-
-          // Match 'jarvis', 'hey jarvis', 'hello jarvis', and common STT phonetic variations
-          const wakeWordRegex = /\b(jarvis|hey jarvis|hello jarvis|hi jarvis|javis|travis)\b/i;
-
-          if (wakeWordRegex.test(transcript)) {
-            try {
-              recognition.stop();
-            } catch (e) {}
-            setIsWakeWordListening(false);
-            triggerAutomatedVoiceFlow();
-          }
-        };
-
-        recognition.onerror = (err) => {
-          // Restart on error if still listening
-          if (err.error !== 'aborted' && isWakeWordListening) {
-            clearTimeout(restartTimer);
-            restartTimer = setTimeout(startRecognition, 1000);
-          }
-        };
-
-        recognition.onend = () => {
-          // Keepalive loop: Auto-restart wake word listener if still enabled
-          if (isWakeWordListening) {
-            clearTimeout(restartTimer);
-            restartTimer = setTimeout(startRecognition, 500);
-          }
-        };
-
-        recognition.start();
-      } catch (err) {
-        if (isWakeWordListening) {
-          clearTimeout(restartTimer);
-          restartTimer = setTimeout(startRecognition, 2000);
-        }
-      }
-    };
-
-    startRecognition();
-
-    return () => {
-      clearTimeout(restartTimer);
-      if (wakeWordRecognitionRef.current) {
+        // List all available microphone input devices
         try {
-          wakeWordRecognitionRef.current.abort();
+          const devices = await navigator.mediaDevices.enumerateDevices();
+          const mics = devices.filter(d => d.kind === 'audioinput');
+          setAudioDevices(mics);
         } catch (e) {}
+
+        // Attach Web Audio API Analyzer to monitor real microphone volume
+        try {
+          const AudioContext = window.AudioContext || window.webkitAudioContext;
+          const audioCtx = new AudioContext();
+          
+          if (audioCtx.state === 'suspended') {
+            await audioCtx.resume();
+          }
+
+          const analyser = audioCtx.createAnalyser();
+          analyser.fftSize = 512;
+          analyser.smoothingTimeConstant = 0.4;
+          
+          const source = audioCtx.createMediaStreamSource(stream);
+          source.connect(analyser);
+          
+          audioContextRef.current = audioCtx;
+          analyserRef.current = analyser;
+
+          const freqArray = new Uint8Array(analyser.frequencyBinCount);
+          const timeArray = new Uint8Array(analyser.fftSize);
+
+          const updateVolume = () => {
+            if (!analyserRef.current) return;
+            
+            // Frequency domain average
+            analyser.getByteFrequencyData(freqArray);
+            const freqSum = freqArray.reduce((acc, val) => acc + val, 0);
+            const freqAvg = freqSum / freqArray.length;
+
+            // Time domain RMS calculation
+            analyser.getByteTimeDomainData(timeArray);
+            let timeSum = 0;
+            for (let i = 0; i < timeArray.length; i++) {
+              const val = (timeArray[i] - 128) / 128;
+              timeSum += val * val;
+            }
+            const rms = Math.sqrt(timeSum / timeArray.length);
+
+            // Combined sensitivity volume percentage (0 - 100%)
+            const vol = Math.min(100, Math.round(Math.max(freqAvg * 1.5, rms * 350)));
+            setAudioVolumeLevel(vol);
+
+            animFrameRef.current = requestAnimationFrame(updateVolume);
+          };
+
+          if (animFrameRef.current) {
+            cancelAnimationFrame(animFrameRef.current);
+          }
+          updateVolume();
+        } catch (e) {
+          console.warn("Web Audio VU Meter error", e);
+        }
       }
-    };
-  }, [token, isWakeWordListening]);
+    } catch (err) {
+      console.warn("Microphone permission denied or prompt dismissed", err);
+      setErrorMsg("Microphone permission required. Click 'ENABLE MIC' in the header to activate voice trigger.");
+    }
+  };
+
+  // Continuous Wake-Word Background Listener ("Hey JARVIS" / "JARVIS")
+  useWakeWordRecognition({
+    enabled: Boolean(token),
+    isWakeWordListening,
+    onWakeWordDetected: () => {
+      setIsWakeWordListening(false);
+      triggerAutomatedVoiceFlow();
+    },
+    onTranscript: (transcriptChunk) => {
+      setLiveSpeechTranscript(transcriptChunk);
+      setSpeechLog(prev => [
+        `[${new Date().toLocaleTimeString()}] STT Heard: "${transcriptChunk}"`,
+        ...prev.slice(0, 4)
+      ]);
+    },
+    onError: (errorType) => {
+      if (errorType === 'not-supported') {
+        setErrorMsg("Web Speech API not supported in this browser. Please use Google Chrome or Microsoft Edge.");
+      } else if (errorType === 'not-allowed') {
+        setErrorMsg("Microphone permission blocked. Please allow mic permissions in browser settings.");
+      }
+    },
+    onStart: () => {
+      setMicPermissionGranted(true);
+    }
+  });
+
+  // Explicitly activate/toggle Always-On JARVIS Voice Engine with User Gesture
+  const toggleAlwaysOnVoiceEngine = async () => {
+    if (!micPermissionGranted) {
+      await requestMicPermission();
+    }
+    
+    if (isWakeWordListening) {
+      setWakeWordStatus("ALWAYS-ON LISTENING ACTIVE: SAY 'HEY JARVIS'");
+      setInfoMsg("JARVIS Always-On Voice Engine activated! Say 'Hey JARVIS' to trigger system.");
+      speakResponse("JARVIS Voice Engine activated. Listening for wake phrase.");
+    } else {
+      setIsWakeWordListening(true);
+      setArcState("idle");
+      setWakeWordStatus("ALWAYS-ON LISTENING ACTIVE: SAY 'HEY JARVIS'");
+      setInfoMsg("Always-On listening enabled.");
+    }
+  };
 
   // AUTOMATED PIPELINE: Wake-Word -> Face ID -> Voice Prompt -> Gemini Execution -> TTS Output
   const triggerAutomatedVoiceFlow = async () => {
@@ -409,7 +505,8 @@ function App() {
         finalCapturedText = transcript;
       };
 
-      recognition.onerror = () => {
+      recognition.onerror = (err) => {
+        console.log("Recognition error", err?.error);
         setIsVoiceRecording(false);
         setArcState("idle");
         setWakeWordStatus("VOICE INPUT CANCELED");
@@ -850,12 +947,20 @@ function App() {
               <button
                 className="btn btn-secondary"
                 style={{ padding: '2px 8px', fontSize: '11px' }}
+                onClick={requestMicPermission}
+                title="Explicitly grant or verify microphone access"
+              >
+                {micPermissionGranted ? '🎙️ MIC: ACTIVE' : '⚠️ ENABLE MIC'}
+              </button>
+              <button
+                className="btn btn-secondary"
+                style={{ padding: '2px 8px', fontSize: '11px' }}
                 onClick={() => setSpeechSynthesisEnabled(!speechSynthesisEnabled)}
               >
-                {speechSynthesisEnabled ? '🔊 VOICE OUTPUT: ON' : '🔇 VOICE OUTPUT: OFF'}
+                {speechSynthesisEnabled ? '🔊 TTS: ON' : '🔇 TTS: OFF'}
               </button>
               <span style={{ fontSize: '11px', color: 'var(--accent-cyan)', background: 'rgba(0,242,254,0.1)', padding: '2px 8px', borderRadius: '12px', border: '1px solid rgba(0,242,254,0.3)' }}>
-                {isWakeWordListening ? '👂 LISTENING FOR "JARVIS"' : '🤖 ACTIVE PROCESSING'}
+                {isWakeWordListening ? '👂 LISTENING FOR "JARVIS"' : '🤖 PROCESSING'}
               </span>
             </div>
           </div>
@@ -864,8 +969,8 @@ function App() {
           <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--border-color)', background: 'rgba(0,0,0,0.15)', textAlign: 'center' }}>
             <div
               className={`arc-reactor-wrapper arc-state-${arcState}`}
-              onClick={triggerAutomatedVoiceFlow}
-              title="Click Arc Reactor to initiate voice command flow"
+              onClick={toggleAlwaysOnVoiceEngine}
+              title="Click Arc Reactor to activate Always-On JARVIS Voice Engine"
             >
               <div className="arc-reactor-ring-outer" />
               <div className="arc-reactor-ring-inner" />
@@ -877,8 +982,82 @@ function App() {
             <div style={{ marginTop: '12px', fontSize: '12px', fontWeight: '600', letterSpacing: '1px', color: arcState === 'listening' ? 'var(--accent-cyan)' : arcState === 'thinking' ? 'var(--accent-purple)' : 'var(--text-secondary)' }}>
               {wakeWordStatus}
             </div>
-            <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: '4px' }}>
-              [Automated Pipeline: Wake Phrase ("Hey JARVIS") → Camera Face ID → Voice Command → Gemini AI]
+
+            {/* Speech & Audio Hardware Debug Panel */}
+            <div className="speech-debug-panel">
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px', fontSize: '12px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <span style={{ color: micPermissionGranted ? 'var(--accent-green)' : 'var(--accent-red)', fontWeight: 'bold' }}>
+                    {micPermissionGranted ? '🟢 HARDWARE MIC: CONNECTED' : '🔴 HARDWARE MIC: DISCONNECTED'}
+                  </span>
+
+                  {/* Microphone Device Selector Dropdown */}
+                  {audioDevices.length > 0 && (
+                    <select
+                      style={{ padding: '2px 6px', fontSize: '10px', background: '#000', color: 'var(--accent-cyan)', border: '1px solid rgba(0,242,254,0.4)', borderRadius: '4px' }}
+                      value={selectedDeviceId}
+                      onChange={(e) => {
+                        setSelectedDeviceId(e.target.value);
+                        requestMicPermission(e.target.value);
+                      }}
+                    >
+                      {audioDevices.map((dev, idx) => (
+                        <option key={dev.deviceId || idx} value={dev.deviceId}>
+                          🎙️ {dev.label || `Microphone ${idx + 1}`}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </div>
+                
+                {/* Audio VU Volume Meter */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <span style={{ fontSize: '10px', color: 'var(--text-muted)' }}>MIC VOL:</span>
+                  <div className="mic-vu-meter" style={{ width: '100px' }}>
+                    {[10, 20, 30, 40, 50, 60, 70, 80, 90, 100].map((thresh, idx) => {
+                      const isActive = audioVolumeLevel >= thresh;
+                      const levelClass = idx < 4 ? 'active-low' : idx < 7 ? 'active-mid' : idx < 9 ? 'active-high' : 'active-peak';
+                      return (
+                        <div
+                          key={idx}
+                          className={`vu-segment ${isActive ? levelClass : ''}`}
+                        />
+                      );
+                    })}
+                  </div>
+                  <span style={{ fontSize: '10px', color: 'var(--accent-cyan)', width: '28px', textAlign: 'right' }}>{audioVolumeLevel}%</span>
+                </div>
+              </div>
+
+              {/* Live Audio Transcript Display */}
+              <div style={{ fontSize: '13px', background: 'rgba(0,0,0,0.6)', padding: '8px 12px', borderRadius: '6px', border: '1px solid rgba(0,242,254,0.3)', marginBottom: '8px' }}>
+                <span style={{ color: 'var(--text-muted)', fontSize: '11px', display: 'block', marginBottom: '2px' }}>LIVE SPEECH TRANSCRIPT:</span>
+                <span style={{ color: liveSpeechTranscript ? 'var(--accent-cyan)' : 'var(--text-muted)', fontFamily: 'Fira Code, monospace', fontWeight: 'bold' }}>
+                  {liveSpeechTranscript ? `"${liveSpeechTranscript}"` : '[ Awaiting speech... speak into your microphone ]'}
+                </span>
+              </div>
+
+              {/* Test Action & Debug Log */}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
+                <div style={{ fontSize: '10px', color: 'var(--text-muted)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {speechLog.length > 0 ? speechLog[0] : 'No speech events logged yet.'}
+                </div>
+                <button
+                  className="btn btn-secondary"
+                  style={{ padding: '3px 8px', fontSize: '10px', whiteSpace: 'nowrap', border: '1px solid var(--accent-cyan)' }}
+                  onClick={startNativeHardwareEngine}
+                  title="Launch Native Python Hardware Mic Engine directly accessing Windows soundcard"
+                >
+                  🖥️ LAUNCH NATIVE ENGINE
+                </button>
+                <button
+                  className="btn"
+                  style={{ padding: '3px 10px', fontSize: '10px', background: 'linear-gradient(135deg, var(--accent-purple), var(--accent-cyan))', whiteSpace: 'nowrap' }}
+                  onClick={triggerAutomatedVoiceFlow}
+                >
+                  ⚡ TEST FLOW
+                </button>
+              </div>
             </div>
           </div>
 
