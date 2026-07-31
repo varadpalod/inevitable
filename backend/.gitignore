@@ -1,0 +1,9 @@
+# Ignore environment secrets and database files
+.env
+.env.*
+*.db
+*.sqlite
+__pycache__/
+venv/
+.venv/
+sandbox/

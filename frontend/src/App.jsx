@@ -4,11 +4,11 @@ import { useWakeWordRecognition } from './hooks/useWakeWordRecognition';
 const API_BASE = "http://127.0.0.1:8000/api/v1";
 
 function App() {
-  // Auth state
-  const [token, setToken] = useState(localStorage.getItem('token') || '');
-  const [sessionId, setSessionId] = useState(localStorage.getItem('sessionId') || '');
-  const [username, setUsername] = useState(localStorage.getItem('username') || '');
-  const [authLevel, setAuthLevel] = useState(parseInt(localStorage.getItem('authLevel')) || 0);
+  // Auth state - starts fresh on page refresh/reload so user lands directly on login screen
+  const [token, setToken] = useState('');
+  const [sessionId, setSessionId] = useState('');
+  const [username, setUsername] = useState('');
+  const [authLevel, setAuthLevel] = useState(0);
 
   // Form states
   const [loginUser, setLoginUser] = useState('admin');
@@ -53,6 +53,15 @@ function App() {
   const analyserRef = useRef(null);
   const animFrameRef = useRef(null);
 
+  // Callback ref to reliably bind stream to video DOM element whenever mounted
+  const setVideoRef = (el) => {
+    videoRef.current = el;
+    if (el && mediaStreamRef.current && el.srcObject !== mediaStreamRef.current) {
+      el.srcObject = mediaStreamRef.current;
+      el.play().catch(e => console.log("Video playback error:", e));
+    }
+  };
+
   // Poll audit logs and native hardware voice status
   useEffect(() => {
     fetchAuditLogs();
@@ -60,7 +69,7 @@ function App() {
     const interval = setInterval(() => {
       fetchAuditLogs();
       fetchNativeVoiceStatus();
-    }, 2000);
+    }, 1000);
     return () => clearInterval(interval);
   }, [sessionId]);
 
@@ -70,6 +79,10 @@ function App() {
       const res = await fetch(`${API_BASE}/commands/native-voice/status`);
       if (res.ok) {
         const data = await res.json();
+        if (data.is_running && data.mic_rms !== undefined) {
+          const rmsVol = Math.min(100, Math.round(data.mic_rms * 400));
+          setAudioVolumeLevel(prev => Math.max(prev, rmsVol));
+        }
         if (data.live_transcript) {
           setLiveSpeechTranscript(data.live_transcript);
           setSpeechLog(prev => [`[Native Hardware Mic] "${data.live_transcript}"`, ...prev.slice(0, 4)]);
@@ -104,6 +117,8 @@ function App() {
   useEffect(() => {
     if (sessionId) {
       checkSessionStatus(sessionId);
+      startNativeHardwareEngine();
+      requestMicPermission();
     }
   }, [sessionId]);
 
@@ -318,13 +333,33 @@ function App() {
       const utterance = new SpeechSynthesisUtterance(text);
       utterance.rate = 1.0;
       utterance.pitch = 0.9;
-      if (onEndCallback) {
-        utterance.onend = onEndCallback;
-        utterance.onerror = () => {
-          console.warn("Speech synthesis utterance error");
-          onEndCallback();
-        };
-      }
+      
+      // Preserve active reference on window to prevent Chrome V8 garbage collection bug
+      window._activeUtterance = utterance;
+
+      let called = false;
+      const safeCallback = () => {
+        if (called) return;
+        called = true;
+        window._activeUtterance = null;
+        if (onEndCallback) onEndCallback();
+      };
+
+      utterance.onend = safeCallback;
+      utterance.onerror = (e) => {
+        console.warn("Speech synthesis utterance error", e);
+        safeCallback();
+      };
+
+      // Guaranteed safety timeout (calculated based on prompt length + buffer)
+      const timeoutDuration = Math.max(2500, (text || '').length * 80 + 1200);
+      setTimeout(() => {
+        if (!called) {
+          console.warn("Speech synthesis safety timer triggered, resuming listening pipeline.");
+          safeCallback();
+        }
+      }, timeoutDuration);
+
       window.speechSynthesis.speak(utterance);
     } catch (e) {
       console.warn("Speech synthesis unavailable", e);
@@ -410,7 +445,7 @@ function App() {
 
   // Continuous Wake-Word Background Listener ("Hey JARVIS" / "JARVIS")
   useWakeWordRecognition({
-    enabled: Boolean(token),
+    enabled: Boolean(token || sessionId),
     isWakeWordListening,
     onWakeWordDetected: () => {
       setIsWakeWordListening(false);
@@ -471,10 +506,10 @@ function App() {
 
         // Step 2: Face Verified, start voice command capture
         setArcState("listening");
-        setWakeWordStatus("FACE VERIFIED (LEVEL 3 ADMIN). LISTENING FOR COMMAND...");
-        setInfoMsg("Face biometrics match 98.4%! Listening for your prompt...");
+        setWakeWordStatus("BIOMETRICS VERIFIED — WELCOME BACK VARAD (LEVEL 3 ADMIN)");
+        setInfoMsg("Facial biometrics match 99.2%! Welcome back, Agent Varad.");
         
-        speakResponse("Biometrics confirmed. Clearance Level 3 active. State your command, Agent.", () => {
+        speakResponse("Biometrics confirmed. Face match 99 percent. Welcome back, Agent Varad. Clearance Level 3 active. State your command.", () => {
           startLiveVoiceInput(true); // autoExecute = true
         });
       });
@@ -602,6 +637,7 @@ function App() {
 
       // Capture frame from webcam video canvas if available
       let blob = null;
+      let isDarkShutterClosed = false;
       if (videoRef.current && videoRef.current.videoWidth > 0 && videoRef.current.videoHeight > 0) {
         try {
           const canvas = document.createElement('canvas');
@@ -609,10 +645,40 @@ function App() {
           canvas.height = videoRef.current.videoHeight;
           const ctx = canvas.getContext('2d');
           ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
+          
+          // Check pixel brightness to detect closed privacy shutter
+          const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+          let totalBrightness = 0;
+          const sampleStep = 16;
+          for (let i = 0; i < imgData.length; i += sampleStep * 4) {
+            totalBrightness += imgData[i] + imgData[i + 1] + imgData[i + 2];
+          }
+          const avgLum = totalBrightness / ((imgData.length / (sampleStep * 4)) * 3);
+          if (avgLum < 12) {
+            isDarkShutterClosed = true;
+          }
+
           blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.85));
         } catch (e) {
           console.warn("Canvas capture error", e);
         }
+      }
+
+      if (isDarkShutterClosed) {
+        if (mediaStreamRef.current) {
+          mediaStreamRef.current.getTracks().forEach(track => track.stop());
+          mediaStreamRef.current = null;
+        }
+        setIsFaceScanning(false);
+        setFaceMatchProgress(0);
+        setErrorMsg("Privacy shutter active or camera lens covered. Please open your webcam shutter.");
+        speakResponse("Facial biometrics failed. Your webcam privacy shutter is closed. Please open your camera shutter.", () => {
+          setArcState("idle");
+          setWakeWordStatus("CAMERA PRIVACY SHUTTER IS CLOSED — PLEASE OPEN SHUTTER");
+          setIsWakeWordListening(true);
+        });
+        if (callback) callback(false);
+        return;
       }
 
       if (!blob || blob.size < 10) {
@@ -811,6 +877,61 @@ function App() {
   // Dashboard layout
   return (
     <div className="app-container">
+      {/* Cyberpunk Biometric Face Scanner Modal Overlay */}
+      {isFaceScanning && (
+        <div style={{
+          position: 'fixed',
+          top: 0, left: 0, right: 0, bottom: 0,
+          backgroundColor: 'rgba(5, 7, 10, 0.85)',
+          backdropFilter: 'blur(12px)',
+          zIndex: 9999,
+          display: 'flex',
+          justifyContent: 'center',
+          alignItems: 'center',
+          padding: '20px'
+        }}>
+          <div className="glass-panel" style={{
+            width: '460px',
+            padding: '24px',
+            border: '1px solid var(--accent-cyan)',
+            boxShadow: '0 0 40px rgba(0, 242, 254, 0.3)',
+            textAlign: 'center',
+            position: 'relative'
+          }}>
+            <div style={{ fontSize: '12px', letterSpacing: '2px', color: 'var(--accent-cyan)', marginBottom: '8px', fontWeight: 'bold' }}>
+              [ PROJECT AEGIS BIOMETRIC SECURITY GATEWAY ]
+            </div>
+            <h3 style={{ margin: '0 0 16px', color: '#fff', fontSize: '18px', textTransform: 'uppercase', letterSpacing: '1px' }}>
+              FACIAL BIOMETRICS SCANNER
+            </h3>
+
+            <div className="webcam-container" style={{ margin: '0 auto 16px', height: '260px' }}>
+              <video ref={setVideoRef} autoPlay playsInline muted className="webcam-video" />
+              <div className="scan-laser" />
+              <div className="face-reticle" />
+              <div className="bio-mesh-overlay" />
+              <div className="corner-bracket corner-tl" />
+              <div className="corner-bracket corner-tr" />
+              <div className="corner-bracket corner-bl" />
+              <div className="corner-bracket corner-br" />
+            </div>
+
+            <div style={{ background: 'rgba(0,0,0,0.4)', borderRadius: '8px', padding: '12px', border: '1px solid rgba(0, 242, 254, 0.2)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: 'var(--accent-cyan)', fontWeight: 'bold', marginBottom: '6px' }}>
+                <span>TARGET: AGENT VARAD</span>
+                <span>MATCH: {faceMatchProgress}%</span>
+              </div>
+              <div style={{ width: '100%', height: '8px', background: 'rgba(255,255,255,0.1)', borderRadius: '4px', overflow: 'hidden' }}>
+                <div style={{ width: `${faceMatchProgress}%`, height: '100%', background: 'linear-gradient(90deg, var(--accent-cyan), var(--accent-purple))', transition: 'width 0.3s ease' }} />
+              </div>
+              <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '8px', fontFamily: 'monospace' }}>
+                {faceMatchProgress < 40 ? '>>> ACQUIRING FACIAL LANDMARKS...' : faceMatchProgress < 80 ? '>>> MATCHING LUMINANCE & FEATURE MATRIX...' : '>>> BIOMETRICS CONFIRMED. GRANTING LEVEL 3 ADMIN...'}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Top Header */}
       <header className="glass-panel app-header">
         <div className="logo-container">
@@ -926,7 +1047,7 @@ function App() {
                   <div style={{ marginTop: '8px' }}>
                     {isFaceScanning ? (
                       <div className="webcam-container">
-                        <video ref={videoRef} autoPlay playsInline muted className="webcam-video" />
+                        <video ref={setVideoRef} autoPlay playsInline muted className="webcam-video" />
                         <div className="scan-laser" />
                         <div className="face-reticle" />
                         <div className="corner-bracket corner-tl" />

@@ -91,12 +91,8 @@ class AegisPlanner:
         if self.use_llm:
             final_response = self._consolidate_via_llm(prompt, results)
         else:
-            # Mock formatting
-            consolidated_parts = []
-            for r in results:
-                consolidated_parts.append(f"Task: {r['step']}\nOutput: {r['output']}")
-            
-            final_response = f"[JARVIS Core OS v1.0]\nAll tasks successfully completed in Sandbox.\n\n" + "\n\n".join(consolidated_parts)
+            consolidated_parts = [r['output'] for r in results if r.get('output')]
+            final_response = "\n\n".join(consolidated_parts)
             
         steps_log.append("[Planner] Pipeline execution finished.")
         return "SUCCESS", final_response, max_required_level, steps_log

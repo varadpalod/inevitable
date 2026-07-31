@@ -16,7 +16,9 @@ out/
 .git/
 .idea/
 .vscode/
-*.log
+# Environment files & Secrets
+.env
+.env.*
+*.db
 *.sqlite
-*.exe
-*.dll
+*.log

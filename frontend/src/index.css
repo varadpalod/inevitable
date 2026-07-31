@@ -519,3 +519,93 @@ input, select, button {
   border-color: var(--accent-cyan);
   box-shadow: var(--shadow-cyan);
 }
+
+/* Cybernetic Biometric Scanner HUD Overlay & Animations */
+.webcam-container {
+  position: relative;
+  width: 100%;
+  height: 220px;
+  border-radius: 12px;
+  overflow: hidden;
+  background: #000;
+  border: 1px solid rgba(0, 242, 254, 0.4);
+  box-shadow: 0 0 20px rgba(0, 242, 254, 0.15), inset 0 0 15px rgba(0, 242, 254, 0.2);
+}
+
+.webcam-video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  filter: contrast(1.1) brightness(1.05) saturate(1.2);
+}
+
+@keyframes laser-sweep {
+  0% { top: 0%; opacity: 0.9; }
+  50% { top: 95%; opacity: 1; }
+  100% { top: 0%; opacity: 0.9; }
+}
+
+.scan-laser {
+  position: absolute;
+  left: 0;
+  width: 100%;
+  height: 4px;
+  background: linear-gradient(90deg, transparent, var(--accent-cyan), #ffffff, var(--accent-cyan), transparent);
+  box-shadow: 0 0 15px var(--accent-cyan), 0 0 30px var(--accent-cyan);
+  animation: laser-sweep 2.2s ease-in-out infinite;
+  z-index: 5;
+}
+
+@keyframes reticle-spin {
+  0% { transform: translate(-50%, -50%) rotate(0deg) scale(0.95); }
+  50% { transform: translate(-50%, -50%) rotate(180deg) scale(1.05); }
+  100% { transform: translate(-50%, -50%) rotate(360deg) scale(0.95); }
+}
+
+.face-reticle {
+  position: absolute;
+  top: 45%;
+  left: 50%;
+  width: 110px;
+  height: 110px;
+  border: 2px dashed var(--accent-cyan);
+  border-radius: 50%;
+  animation: reticle-spin 4s linear infinite;
+  z-index: 4;
+  box-shadow: 0 0 15px rgba(0, 242, 254, 0.3);
+}
+
+.face-reticle::before {
+  content: '';
+  position: absolute;
+  top: -8px; left: -8px; right: -8px; bottom: -8px;
+  border: 1px solid rgba(168, 85, 247, 0.6);
+  border-radius: 50%;
+  border-top-color: transparent;
+  border-bottom-color: transparent;
+}
+
+.bio-mesh-overlay {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  pointer-events: none;
+  background: radial-gradient(circle at 50% 45%, rgba(0, 242, 254, 0.15) 0%, transparent 60%),
+              linear-gradient(rgba(0, 242, 254, 0.05) 1px, transparent 1px),
+              linear-gradient(90deg, rgba(0, 242, 254, 0.05) 1px, transparent 1px);
+  background-size: 100% 100%, 20px 20px, 20px 20px;
+  z-index: 3;
+}
+
+.corner-bracket {
+  position: absolute;
+  width: 20px;
+  height: 20px;
+  border-color: var(--accent-cyan);
+  border-style: solid;
+  z-index: 6;
+}
+
+.corner-tl { top: 8px; left: 8px; border-width: 3px 0 0 3px; }
+.corner-tr { top: 8px; right: 8px; border-width: 3px 3px 0 0; }
+.corner-bl { bottom: 8px; left: 8px; border-width: 0 0 3px 3px; }
+.corner-br { bottom: 8px; right: 8px; border-width: 0 3px 3px 0; }

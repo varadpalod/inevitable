@@ -290,3 +290,25 @@ def get_session_status(session_id: str, db: Session = Depends(get_db)):
         "is_active": session.is_active,
         "start_time": session.start_time
     }
+
+@router.post("/re-enroll-face")
+def re_enroll_face(session_id: str = Form(...), db: Session = Depends(get_db)):
+    """
+    Clears stored face template for the session's user, forcing re-enrollment on next scan.
+    Useful when OpenCV is newly installed and old fake templates need to be replaced.
+    """
+    session = db.query(UserSession).filter(UserSession.id == session_id, UserSession.is_active == True).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Active session not found")
+
+    result = biometric_service.re_enroll_face(session.user_id)
+
+    log = AuditLog(
+        action="FACE_RE_ENROLLMENT",
+        status="SUCCESS",
+        details=f"Face template cleared for user {session.user_id}. Re-enrollment required."
+    )
+    db.add(log)
+    db.commit()
+
+    return result
